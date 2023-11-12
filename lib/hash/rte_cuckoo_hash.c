@@ -920,10 +920,19 @@ rte_hash_cuckoo_make_space_mw(const struct rte_hash *h,
 			struct rte_hash_bucket *sec_bkt,
 			const struct rte_hash_key *key, void *data,
 			uint16_t sig, uint32_t bucket_idx,
-			uint32_t new_idx, int32_t *ret_val)
+			uint32_t new_idx, int32_t *ret_val,
+			uint32_t max_iterations, uint32_t *num_iterations)
 {
 	unsigned int i;
-	struct queue_node queue[RTE_HASH_BFS_QUEUE_MAX_LEN];
+	/*
+	 * At each iteration of the loop below 8 elements are added to
+	 * the queue and and 1 is consumed. By default there are 1024
+	 * slots in the queue, so the queue will become full after
+	 * 1024/8=128 iterations, i.e. maximum 128 buckets will
+	 * be explored (not necessarily different).
+	 */
+	uint32_t bfs_queue_len = max_iterations * RTE_HASH_BUCKET_ENTRIES;
+	struct queue_node queue[bfs_queue_len];
 	struct queue_node *tail, *head;
 	struct rte_hash_bucket *curr_bkt, *alt_bkt;
 	uint32_t cur_idx, alt_idx;
@@ -937,7 +946,7 @@ rte_hash_cuckoo_make_space_mw(const struct rte_hash *h,
 
 	/* Cuckoo bfs Search */
 	while (likely(tail != head && head <
-					queue + RTE_HASH_BFS_QUEUE_MAX_LEN -
+					queue + bfs_queue_len -
 					RTE_HASH_BUCKET_ENTRIES)) {
 		curr_bkt = tail->bkt;
 		cur_idx = tail->cur_bkt_idx;
@@ -962,6 +971,7 @@ rte_hash_cuckoo_make_space_mw(const struct rte_hash *h,
 			head++;
 		}
 		tail++;
+		(*num_iterations)++;
 	}
 
 	return -ENOSPC;
@@ -1001,7 +1011,8 @@ alloc_slot(const struct rte_hash *h, struct lcore_cache *cached_free_slots)
 
 static inline int32_t
 __rte_hash_add_key_with_hash(const struct rte_hash *h, const void *key,
-						hash_sig_t sig, void *data)
+						hash_sig_t sig, void *data,
+						uint32_t max_iterations, uint32_t *num_iterations)
 {
 	uint16_t short_sig;
 	uint32_t prim_bucket_idx, sec_bucket_idx;
@@ -1015,6 +1026,7 @@ __rte_hash_add_key_with_hash(const struct rte_hash *h, const void *key,
 	struct lcore_cache *cached_free_slots = NULL;
 	int32_t ret_val;
 	struct rte_hash_bucket *last;
+	uint32_t iter_cnt = 0;
 
 	short_sig = get_short_sig(sig);
 	prim_bucket_idx = get_prim_bucket_index(h, sig);
@@ -1086,7 +1098,11 @@ __rte_hash_add_key_with_hash(const struct rte_hash *h, const void *key,
 
 	/* Primary bucket full, need to make space for new entry */
 	ret = rte_hash_cuckoo_make_space_mw(h, prim_bkt, sec_bkt, key, data,
-				short_sig, prim_bucket_idx, slot_id, &ret_val);
+				short_sig, prim_bucket_idx, slot_id, &ret_val,
+				max_iterations, &iter_cnt);
+	if (num_iterations)
+		*num_iterations = iter_cnt;
+
 	if (ret == 0)
 		return slot_id - 1;
 	else if (ret == 1) {
@@ -1096,7 +1112,10 @@ __rte_hash_add_key_with_hash(const struct rte_hash *h, const void *key,
 
 	/* Also search secondary bucket to get better occupancy */
 	ret = rte_hash_cuckoo_make_space_mw(h, sec_bkt, prim_bkt, key, data,
-				short_sig, sec_bucket_idx, slot_id, &ret_val);
+				short_sig, sec_bucket_idx, slot_id, &ret_val,
+				max_iterations, &iter_cnt);
+	if (num_iterations)
+		*num_iterations = iter_cnt;
 
 	if (ret == 0)
 		return slot_id - 1;
@@ -1192,19 +1211,32 @@ failure:
 
 }
 
+/* FIXME: max_iterations should better be specific in hash table config */
+int32_t
+rte_hash_add_key_with_hash_iter(const struct rte_hash *h,
+			const void *key, hash_sig_t sig,
+			uint32_t max_iterations, uint32_t *num_iterations)
+{
+	RETURN_IF_TRUE(((h == NULL) || (key == NULL)), -EINVAL);
+	return __rte_hash_add_key_with_hash(h, key, sig, 0,
+			max_iterations, num_iterations);
+}
+
 int32_t
 rte_hash_add_key_with_hash(const struct rte_hash *h,
 			const void *key, hash_sig_t sig)
 {
 	RETURN_IF_TRUE(((h == NULL) || (key == NULL)), -EINVAL);
-	return __rte_hash_add_key_with_hash(h, key, sig, 0);
+	return __rte_hash_add_key_with_hash(h, key, sig, 0,
+			RTE_HASH_BFS_MAX_ITER_DEFAULT, NULL);
 }
 
 int32_t
 rte_hash_add_key(const struct rte_hash *h, const void *key)
 {
 	RETURN_IF_TRUE(((h == NULL) || (key == NULL)), -EINVAL);
-	return __rte_hash_add_key_with_hash(h, key, rte_hash_hash(h, key), 0);
+	return __rte_hash_add_key_with_hash(h, key, rte_hash_hash(h, key), 0,
+			RTE_HASH_BFS_MAX_ITER_DEFAULT, NULL);
 }
 
 int
@@ -1214,7 +1246,8 @@ rte_hash_add_key_with_hash_data(const struct rte_hash *h,
 	int ret;
 
 	RETURN_IF_TRUE(((h == NULL) || (key == NULL)), -EINVAL);
-	ret = __rte_hash_add_key_with_hash(h, key, sig, data);
+	ret = __rte_hash_add_key_with_hash(h, key, sig, data,
+			RTE_HASH_BFS_MAX_ITER_DEFAULT, NULL);
 	if (ret >= 0)
 		return 0;
 	else
@@ -1228,7 +1261,8 @@ rte_hash_add_key_data(const struct rte_hash *h, const void *key, void *data)
 
 	RETURN_IF_TRUE(((h == NULL) || (key == NULL)), -EINVAL);
 
-	ret = __rte_hash_add_key_with_hash(h, key, rte_hash_hash(h, key), data);
+	ret = __rte_hash_add_key_with_hash(h, key, rte_hash_hash(h, key), data,
+			RTE_HASH_BFS_MAX_ITER_DEFAULT, NULL);
 	if (ret >= 0)
 		return 0;
 	else

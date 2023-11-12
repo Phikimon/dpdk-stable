@@ -295,6 +295,11 @@ rte_hash_add_key_with_hash_data(const struct rte_hash *h, const void *key,
 int32_t
 rte_hash_add_key(const struct rte_hash *h, const void *key);
 
+int32_t
+rte_hash_add_key_with_hash_iter(const struct rte_hash *h,
+			const void *key, hash_sig_t sig,
+			uint32_t max_iterations, uint32_t *num_iterations);
+
 /**
  * Add a key to an existing hash table.
  * This operation is not multi-thread safe
