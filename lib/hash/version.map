@@ -8,6 +8,7 @@ DPDK_23 {
 	rte_hash_add_key_data;
 	rte_hash_add_key_with_hash;
 	rte_hash_add_key_with_hash_data;
+	rte_hash_add_key_with_hash_iter;
 	rte_hash_count;
 	rte_hash_create;
 	rte_hash_del_key;
